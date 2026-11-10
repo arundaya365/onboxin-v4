@@ -1,0 +1,638 @@
+import { validateReturnRows } from './src/utils/backendValidation.ts';
+import { validateClaimPayload } from './src/utils/claimWorkflow.ts';
+import express from 'express';
+import type { Request, Response } from 'express';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { GoogleGenAI, Type } from '@google/genai';
+import { processUnboxingReport } from './src/processor.ts';
+import type { UnboxingSessionInput, StandardKondisi } from './src/processor.ts';
+import { WarehouseStore } from './src/serverDataStore.ts';
+import { localDatabase } from './src/db/index.ts';
+import { createSession, getSessionUser, destroySession, setSessionCookie, clearSessionCookie, requireSession, requireRoles } from './src/middleware/auth.ts';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const isProd = process.env.NODE_ENV === 'production';
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';
+
+// Perbandingan payload sinkronisasi tidak boleh bergantung pada urutan property JSON.
+const stableStringify = (value: unknown): string => JSON.stringify(value, (_key, current) => {
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
+  return Object.keys(current as Record<string, unknown>)
+    .sort()
+    .reduce<Record<string, unknown>>((sorted, key) => {
+      sorted[key] = (current as Record<string, unknown>)[key];
+      return sorted;
+    }, {});
+});
+
+const app = express();
+if (process.env.LOCAL_TRIAL === 'true') {
+  const canDownloadLocalBackup = (req: Request): boolean => {
+    const tokenMatches = Boolean(process.env.LOCAL_STOP_TOKEN && req.headers['x-local-stop-token'] === process.env.LOCAL_STOP_TOKEN);
+    const sessionUser = getSessionUser(req);
+    return tokenMatches || sessionUser?.role === 'SUPER_ADMIN';
+  };
+  app.get('/api/local/backup', async (req, res) => {
+    if (!localDatabase || !canDownloadLocalBackup(req)) {
+      res.sendStatus(403);
+      return;
+    }
+    try {
+      const archive = await localDatabase.dumpDataDir('gzip');
+      res.setHeader('Content-Type', 'application/gzip');
+      res.send(Buffer.from(await archive.arrayBuffer()));
+    } catch (error) {
+      console.error('Local backup failed:', error);
+      res.sendStatus(500);
+    }
+  });
+  app.get('/api/local/backup/json', (req, res) => {
+    if (!canDownloadLocalBackup(req)) {
+      res.sendStatus(403);
+      return;
+    }
+    const snapshot = WarehouseStore.getAll();
+    const payload = {
+      backupVersion: 1,
+      createdAt: new Date().toISOString(),
+      source: 'unboxin.id local trial',
+      data: snapshot
+    };
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="unboxin-backup-${new Date().toISOString().slice(0, 10)}.json"`);
+    res.send(JSON.stringify(payload, null, 2));
+  });
+  app.post('/api/local/stop', (req, res) => {
+    if (!process.env.LOCAL_STOP_TOKEN || req.headers['x-local-stop-token'] !== process.env.LOCAL_STOP_TOKEN) {
+      res.sendStatus(403);
+      return;
+    }
+    res.json({ success: true });
+    setTimeout(async () => {
+      await localDatabase?.close();
+      process.exit(0);
+    }, 300);
+  });
+}
+// Master SKU may contain tens of thousands of rows. Keep a generous transport
+// ceiling; the database itself has no application-level SKU count limit.
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+
+// Inisialisasi Gemini AI jika key tersedia
+const apiKey = process.env.GEMINI_API_KEY;
+let aiClient: GoogleGenAI | null = null;
+if (apiKey) {
+  try {
+    aiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  } catch (err) {
+    console.warn('Gemini client initialization warning:', err);
+  }
+}
+
+/**
+ * Health check endpoint
+ */
+app.post('/api/auth/login', (req: Request, res: Response) => {
+  const identifier = String(req.body?.identifier || '').trim().toLowerCase();
+  const pin = String(req.body?.pin || '').trim();
+  if (!identifier || !/^\d{4,6}$/.test(pin)) {
+    res.status(400).json({ success: false, message: 'ID operator dan PIN 4-6 digit wajib diisi.' });
+    return;
+  }
+  const account = WarehouseStore.getAll().users.find((user) =>
+    [user.id, user.operatorCode, user.username, user.email].some((value) => String(value || '').trim().toLowerCase() === identifier)
+  );
+  if (!account || account.status !== 'ACTIVE' || String(account.pin || '') !== pin) {
+    res.status(401).json({ success: false, message: 'ID operator atau PIN tidak sesuai.' });
+    return;
+  }
+  const token = createSession(account);
+  const requestIsHttps = req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https';
+  setSessionCookie(res, token, requestIsHttps);
+  const { pin: _pin, ...safeAccount } = account;
+  res.json({ success: true, user: safeAccount });
+});
+
+app.get('/api/auth/session', (req: Request, res: Response) => {
+  const user = getSessionUser(req);
+  if (!user) {
+    res.status(401).json({ success: false, message: 'Sesi login tidak ditemukan atau sudah berakhir.' });
+    return;
+  }
+  res.json({ success: true, user });
+});
+
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  destroySession(req);
+  clearSessionCookie(res);
+  res.json({ success: true });
+});
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    localTrial: process.env.LOCAL_TRIAL === 'true',
+    service: 'Backend Logic Processor - Sistem Aplikasi Retur Gudang e-Commerce',
+    geminiEnabled: Boolean(aiClient),
+    timestamp: new Date().toISOString()
+  });
+});
+
+/**
+ * Endpoint Utama: Memproses sesi unboxing
+ * Menerima payload dari frontend dan mengembalikan FORMAT OUTPUT WAJIB (JSON ARRAY murni).
+ */
+app.use('/api/process-unboxing', requireSession);
+app.post('/api/process-unboxing', async (req: Request, res: Response) => {
+  try {
+    const payload: UnboxingSessionInput = req.body;
+
+    if (!payload || typeof payload !== 'object') {
+      res.status(400).json({ error: 'Payload harus berupa JSON object sesi unboxing' });
+      return;
+    }
+
+    const transcript = String(
+      payload.audio_transcript || payload.Audio_Transcript || payload.transcript || ''
+    ).trim();
+
+    // Jika ada transcript dan Gemini AI aktif, gunakan Gemini untuk ekstraksi ucapan tingkat lanjut
+    if (transcript && aiClient) {
+      try {
+        const expectedItems = payload.Expected_SKUs || payload.expected_skus || payload.expectedSkus || [];
+        const prompt = `Anda adalah asisten gudang e-commerce. Analisis ucapan operator unboxing berikut:
+"${transcript}"
+
+Daftar barang pesanan:
+${JSON.stringify(expectedItems, null, 2)}
+
+Ekstrak status kondisi untuk setiap barang yang disebutkan.
+Status kondisi HANYA boleh salah satu dari: "Good", "Damage Product", "Damage Packaging", "Missing", "Unexpected".
+Berikan catatan tambahan yang jelas dan faktual berdasarkan ucapan operator.`;
+
+        const geminiCall = aiClient.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  sku_id: { type: Type.STRING },
+                  kondisi: {
+                    type: Type.STRING,
+                    description: 'HANYA: Good, Damage Product, Damage Packaging, Missing, atau Unexpected'
+                  },
+                  catatan: { type: Type.STRING, description: 'Deskripsi ringkas temuan dari ucapan' }
+                },
+                required: ['sku_id', 'kondisi', 'catatan']
+              }
+            }
+          }
+        });
+
+        // Batasi maksimal 4.5 detik agar API responsif
+        const timeoutPromise = new Promise<null>((_, reject) =>
+          setTimeout(() => reject(new Error('Gemini timeout')), 4500)
+        );
+
+        const response = await Promise.race([geminiCall, timeoutPromise]);
+
+        if (response && response.text) {
+          const aiParsed = JSON.parse(response.text.trim()) as Array<{
+            sku_id: string;
+            kondisi: string;
+            catatan: string;
+          }>;
+
+          // Perkaya scanned_skus dengan hasil analisis AI jika belum ada
+          const scannedList = (payload.Scanned_SKUs || payload.scanned_skus || payload.scannedSkus || []) as Array<Record<string, unknown>>;
+          for (const item of aiParsed) {
+            const found = scannedList.find(s => 
+              String(s.SKU_ID || s.sku_id || s.sku || '').toLowerCase() === item.sku_id.toLowerCase()
+            );
+            if (found) {
+              if (!found.Kondisi && !found.kondisi) {
+                found.Kondisi = item.kondisi;
+              }
+              const oldNote = String(found.Catatan_Tambahan || found.catatan || '');
+              found.Catatan_Tambahan = oldNote ? `${oldNote} (Audio AI: ${item.catatan})` : item.catatan;
+            }
+          }
+        }
+      } catch (aiErr) {
+        // Fallback gracefully ke rule-based processor jika Gemini API gagal atau rate limit
+        console.warn('Gemini audio transcript analysis skipped, falling back to rule-based engine:', aiErr);
+      }
+    }
+
+    // Jalankan pemrosesan aturan wajib 1 - 6
+    const processedRows = processUnboxingReport(payload);
+
+    // Otomatis sinkronkan hasil unboxing ke database bersama Cloud SQL (Web & Mobile)
+    const orderId = payload.Order_ID || payload.order_id;
+    try {
+      await dbSaveReturns(processedRows, orderId);
+    } catch (saveError) {
+      console.error('Failed to persist processed returns:', saveError);
+      res.status(503).json({error:'Hasil pemeriksaan belum tersimpan di database. Coba lagi.'});return;
+    }
+    WarehouseStore.saveReturns(processedRows, orderId);
+
+
+    // KEMBALIKAN FORMAT OUTPUT WAJIB: JSON ARRAY murni
+    res.setHeader('Content-Type', 'application/json');
+    res.status(200).json(processedRows);
+  } catch (error) {
+    console.error('Error processing unboxing payload:', error);
+    res.status(500).json({
+      error: 'Gagal memproses sesi unboxing',
+      detail: 'Periksa data masukan atau coba lagi.'
+    });
+  }
+});
+
+import {
+  getWarehouseData,
+  dbSaveReturns,
+  dbSetAllReturns,
+  dbDeleteOrder,
+  dbDeleteRow,
+  dbDeleteBulkOrders,
+  dbDeleteBulkRows,
+  dbSaveDisputes,
+  dbSaveMasterDatabase,
+  dbSaveUsers,
+  dbDeleteUser,
+  dbCleanDemoAccounts,
+  dbSaveLearnedPrefix,
+  dbGetLearnedPrefixes,
+  ensureDatabaseSeeded
+} from './src/db/warehouseDb.ts';
+
+/**
+ * =========================================================================
+ * ENDPOINTS SINKRONISASI DATA MULTI-PERANGKAT (WEB BROWSER & MOBILE BROWSER)
+ * DENGAN CLOUD SQL POSTGRESQL (PERSISTENSI LINTAS DEVICE)
+ * =========================================================================
+ */
+app.use('/api/sync', requireSession);
+
+// 1. Ambil seluruh data pusat gudang (Returns, Disputes, Master SKU, Users)
+app.get('/api/sync', async (_req: Request, res: Response) => {
+  try {
+    const data = await getWarehouseData();
+    res.json(data);
+  } catch (error) {
+    console.warn('Fallback to in-memory store for /api/sync:', error);
+    res.status(503).json({error: 'Database belum dapat dibaca. Coba lagi.'});
+  }
+});
+
+// 2. Simpan / perbarui baris return hasil unboxing
+app.post('/api/sync/returns', async (req: Request, res: Response) => {
+  try {
+    const { rows, orderId } = req.body;
+    if (!Array.isArray(rows)) {
+      res.status(400).json({ error: 'rows harus berupa array data return' });
+      return;
+    }
+    const invalidRows=validateReturnRows(rows,orderId);
+    if(invalidRows){res.status(400).json({error:invalidRows});return;}
+    // Simpan ke PostgreSQL Cloud SQL
+    const result = await dbSaveReturns(rows, orderId);
+    // Simpan juga ke in-memory cache
+    WarehouseStore.saveReturns(rows, orderId);
+    res.json({ success: true, count: result.count, lastUpdated: result.lastUpdated });
+  } catch (error) {
+    console.error('Error saving returns to database, fallback in-memory:', error);
+    res.status(503).json({error: 'Data retur belum tersimpan di database. Coba lagi.'});
+  }
+});
+
+// 3. Timpa seluruh daftar return (bulk sync / full refresh)
+app.post('/api/sync/replace-returns', requireRoles('SUPER_ADMIN'), async (req: Request, res: Response) => {
+  try {
+    const { rows } = req.body;
+    if (!Array.isArray(rows)) {
+      res.status(400).json({ error: 'rows harus berupa array' });
+      return;
+    }
+    const invalidRows = rows.map((row:any)=>validateReturnRows([row])).find(Boolean);
+    if(invalidRows){res.status(400).json({error:invalidRows});return;}
+    const result = await dbSetAllReturns(rows);
+    WarehouseStore.setAllReturns(rows);
+    res.json({ success: true, count: result.count, lastUpdated: result.lastUpdated });
+  } catch (error) {
+    console.error('Error replacing returns:', error);
+    res.status(503).json({error: 'Penggantian data retur gagal. Data belum tersimpan.'});
+  }
+});
+
+// 4. Hapus order spesifik
+app.post('/api/sync/delete-order', requireRoles('SUPER_ADMIN'), async (req: Request, res: Response) => {
+  try {
+    const { orderId } = req.body;
+    if (!orderId) {
+      res.status(400).json({ error: 'orderId wajib diisi' });
+      return;
+    }
+    const count = await dbDeleteOrder(orderId);
+    WarehouseStore.deleteOrder(orderId);
+    res.json({ success: true, count });
+  } catch (error) {
+    console.error('Error deleting order:', error);
+    res.status(503).json({error: 'Penghapusan pesanan belum berhasil di database.'});
+  }
+});
+
+// 5. Hapus baris spesifik (orderId + skuId)
+app.post('/api/sync/delete-row', requireRoles('SUPER_ADMIN'), async (req: Request, res: Response) => {
+  try {
+    const { orderId, skuId } = req.body;
+    if (!orderId || !skuId) {
+      res.status(400).json({ error: 'orderId dan skuId wajib diisi' });
+      return;
+    }
+    const count = await dbDeleteRow(orderId, skuId);
+    WarehouseStore.deleteRow(orderId, skuId);
+    res.json({ success: true, count });
+  } catch (error) {
+    console.error('Error deleting row:', error);
+    res.status(503).json({error: 'Penghapusan barang belum berhasil di database.'});
+  }
+});
+
+// 6. Hapus massal (bulk delete orders atau rows)
+app.post('/api/sync/bulk-delete', requireRoles('SUPER_ADMIN'), async (req: Request, res: Response) => {
+  try {
+    const { orderIds, rowKeys } = req.body;
+    let count = 0;
+    if (Array.isArray(orderIds) && orderIds.length > 0) {
+      count = await dbDeleteBulkOrders(orderIds);
+      WarehouseStore.deleteBulkOrders(orderIds);
+    } else if (Array.isArray(rowKeys) && rowKeys.length > 0) {
+      count = await dbDeleteBulkRows(rowKeys);
+      WarehouseStore.deleteBulkRows(rowKeys);
+    } else {
+      res.status(400).json({ error: 'orderIds atau rowKeys wajib diisi' });
+      return;
+    }
+    res.json({ success: true, count });
+  } catch (error) {
+    console.error('Error bulk delete:', error);
+    res.status(500).json({ error: 'Gagal hapus massal di server' });
+  }
+});
+
+// 7. Simpan / perbarui catatan dispute claims CS
+let disputeWriteQueue: Promise<void> = Promise.resolve();
+app.post('/api/sync/disputes', requireRoles('SUPER_ADMIN', 'WAREHOUSE_MANAGER', 'CS_DISPUTE', 'FINANCE'), async (req: Request, res: Response) => {
+  const preceding = disputeWriteQueue;
+  let release!: () => void;
+  disputeWriteQueue = new Promise<void>(resolve => { release = resolve; });
+  await preceding;
+  try {
+    const { disputes } = req.body;
+    if (!disputes || typeof disputes !== 'object' || Array.isArray(disputes)) {
+      res.status(400).json({ error: 'disputes harus berupa object' });
+      return;
+    }
+    let lastUpdated: string | null = null;
+    try {
+      const current = await getWarehouseData();
+      if (req.body.expectedDisputes !== undefined && stableStringify(req.body.expectedDisputes) !== stableStringify(current.disputes)) { res.status(409).json({error:'Data klaim sudah diperbarui tim lain. Muat ulang dan periksa perubahan sebelum menyimpan.'}); return; }
+      const admin = (req as any).sessionUser?.role === 'SUPER_ADMIN' ? (req as any).sessionUser : null;
+      const requestsReopen = Object.entries(disputes).some(([key,item]:any)=>!key.startsWith('_')&&item?.reopenedAt&&!current.disputes?.[key]?.reopenedAt)
+        || (Array.isArray(disputes._rma_claims_list_) && disputes._rma_claims_list_.some((item:any)=>item?.reopenedAt&&!((current.disputes?._rma_claims_list_||[]) as any[]).some(old=>old.id===item.id&&old.reopenedAt)));
+      if (requestsReopen && !admin) { res.status(403).json({error:'Pembukaan kembali kasus memerlukan verifikasi Super Akun.'}); return; }
+      const workflowError = validateClaimPayload(current.disputes, disputes, requestsReopen && Boolean(admin));
+      if (workflowError) { res.status(409).json({error: workflowError}); return; }
+      lastUpdated = await dbSaveDisputes(disputes);
+    } catch (dbErr) {
+      console.warn('Database save warning (disputes):', dbErr);
+      res.status(503).json({error: 'Klaim belum tersimpan di database. Coba lagi.'});
+      return;
+    }
+    const updated = WarehouseStore.saveDisputes(disputes);
+    res.json({ success: true, lastUpdated: lastUpdated || updated.lastUpdated });
+  } catch (error) {
+    console.error('Error saving disputes:', error);
+    res.status(500).json({ error: 'Gagal sinkron disputes' });
+  } finally { release(); }
+});
+
+// 8. Simpan / perbarui database master SKU
+app.post('/api/sync/master-db', requireRoles('SUPER_ADMIN', 'WAREHOUSE_MANAGER', 'CS_DISPUTE'), async (req: Request, res: Response) => {
+  try {
+    const { masterDatabase } = req.body;
+    if (!Array.isArray(masterDatabase)) {
+      res.status(400).json({ error: 'masterDatabase harus berupa array' });
+      return;
+    }
+    let count = 0;
+    try {
+      count = await dbSaveMasterDatabase(masterDatabase);
+    } catch (dbErr) {
+      console.warn('Database save warning (master-db), falling back to WarehouseStore:', dbErr);
+      throw dbErr;
+    }
+    const updated = WarehouseStore.saveMasterDatabase(masterDatabase);
+    res.json({
+      success: true,
+      count: count || updated.masterDatabase.length,
+      lastUpdated: updated.lastUpdated
+    });
+  } catch (error) {
+    console.error('Error saving master database:', error);
+    res.status(500).json({ error: 'Gagal sinkron master database' });
+  }
+});
+
+// 9. Simpan / perbarui pengguna
+app.post('/api/sync/users', requireRoles('SUPER_ADMIN'), async (req: Request, res: Response) => {
+  try {
+    const { users } = req.body;
+    if (!Array.isArray(users)) {
+      res.status(400).json({ error: 'users harus berupa array' });
+      return;
+    }
+    let count = 0;
+    try {
+      count = await dbSaveUsers(users);
+    } catch (dbErr) {
+      console.warn('Database save warning (users), falling back to WarehouseStore:', dbErr);
+      throw dbErr;
+    }
+    const updated = WarehouseStore.saveUsers(users);
+    res.json({
+      success: true,
+      count: count || updated.users.length,
+      lastUpdated: updated.lastUpdated
+    });
+  } catch (error) {
+    console.error('Error saving users:', error);
+    res.status(500).json({ error: 'Gagal sinkron users' });
+  }
+});
+
+// 10. Hapus akun pengguna secara permanen lintas perangkat
+app.post('/api/sync/delete-user', requireRoles('SUPER_ADMIN'), async (req: Request, res: Response) => {
+  try {
+    const { userId, operatorCode } = req.body;
+    const target = userId || operatorCode;
+    if (!target) {
+      res.status(400).json({ error: 'userId atau operatorCode wajib disertakan' });
+      return;
+    }
+
+    const clean = String(target).trim();
+    if (clean === 'USR-001' || clean.toUpperCase() === 'OPR-HQ-01') {
+      res.status(403).json({ error: 'Akun Super Admin Yaya Sanjaya dilindungi dan tidak dapat dihapus' });
+      return;
+    }
+
+    try {
+      await dbDeleteUser(clean);
+    } catch (dbErr) {
+      console.warn('Database delete warning (user), falling back to in-memory:', dbErr);
+      throw dbErr;
+    }
+
+    const updated = WarehouseStore.deleteUser(clean);
+    res.json({
+      success: true,
+      remainingCount: updated.users.length,
+      lastUpdated: updated.lastUpdated
+    });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({ error: 'Gagal menghapus akun pengguna' });
+  }
+});
+
+// 11. Bersihkan seluruh akun demo lama (hanya menyisakan Yaya Sanjaya)
+app.post('/api/sync/clean-demo-users', requireRoles('SUPER_ADMIN'), async (_req: Request, res: Response) => {
+  try {
+    let count = 1;
+    try {
+      count = await dbCleanDemoAccounts();
+    } catch (dbErr) {
+      console.warn('dbCleanDemoAccounts warning, falling back to in-memory:', dbErr);
+      throw dbErr;
+    }
+    const updated = WarehouseStore.saveUsers([
+      {
+        id: 'USR-001',
+        username: 'yaya.sanjaya',
+        fullName: 'Yaya Sanjaya',
+        email: 'yaya.sanjaya@tirtakumalasari.co.id',
+        role: 'SUPER_ADMIN',
+        department: 'Direksi / IT & Supply Chain',
+        company: 'PT. Tirta Kumala Sari',
+        operatorCode: 'OPR-HQ-01',
+        pin: '1234',
+        status: 'ACTIVE',
+        lastLogin: '2026-10-09 14:35',
+        avatarColor: 'from-[#0F766E] to-[#115E59]'
+      }
+    ]);
+    res.json({
+      success: true,
+      remainingCount: count || updated.users.length,
+      lastUpdated: updated.lastUpdated
+    });
+  } catch (error) {
+    console.error('Error cleaning demo users:', error);
+    res.status(500).json({ error: 'Gagal membersihkan akun demo' });
+  }
+});
+
+// 12. Simpan prefix AWB yang dipelajari ke database Cloud SQL dan in-memory store
+app.post('/api/sync/awb-prefix', async (req: Request, res: Response) => {
+  try {
+    const { prefix, marketplace, logistics } = req.body;
+    const cleanPrefix = String(prefix || '').trim().toUpperCase();
+    if (!cleanPrefix) {
+      res.status(400).json({ error: 'Prefix resi wajib disertakan' });
+      return;
+    }
+
+    let learned: Record<string, any> = {};
+    try {
+      learned = await dbSaveLearnedPrefix(cleanPrefix, String(marketplace || 'Lainnya'), String(logistics || 'Lainnya'));
+    } catch (dbErr) {
+      console.warn('Database save warning (awb-prefix), falling back to in-memory:', dbErr);
+      throw dbErr;
+    }
+
+    const updated = WarehouseStore.saveLearnedPrefix(cleanPrefix, String(marketplace || 'Lainnya'), String(logistics || 'Lainnya'));
+    res.json({
+      success: true,
+      learnedPrefixes: (Object.keys(learned).length > 0 ? learned : updated.learnedPrefixes) || {},
+      lastUpdated: updated.lastUpdated
+    });
+  } catch (error) {
+    console.error('Error saving learned awb prefix:', error);
+    res.status(500).json({ error: 'Gagal menyimpan prefix resi' });
+  }
+});
+
+
+
+
+app.use('/api', (_req, res) => {res.status(404).json({error:'Endpoint API tidak ditemukan.'});});
+app.use((error: any, _req: Request, res: Response, _next: any) => {
+  const status=error?.type==='entity.too.large' ? 413 : error instanceof SyntaxError ? 400 : 500;
+  res.status(status).json({error:status===413?'Ukuran data melebihi batas.':status===400?'Format JSON tidak valid.':'Terjadi kesalahan pada server.'});
+});
+
+// Setup Vite atau Static File serving
+async function initServer() {
+  await ensureDatabaseSeeded();
+  if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.get('*', (_req: Request, res: Response) => {
+      res.sendFile(path.resolve(__dirname, 'dist/index.html'));
+    });
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const server = app.listen(PORT, HOST, () => {
+      console.log(`Backend Logic Processor Server running at http://${HOST}:${PORT}`);resolve();
+    });
+    server.once('error', reject);
+  });
+}
+
+initServer().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
+
+
+
+
+
