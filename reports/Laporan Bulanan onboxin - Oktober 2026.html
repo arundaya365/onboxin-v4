@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="id">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laporan Bulanan Retur Gudang · Oktober 2026</title>
+<style>
+  :root {
+    color-scheme: light;
+    --ink: #211936;
+    --muted: #625873;
+    --paper: #fbf9ff;
+    --lavender: #e8dfff;
+    --violet: #59369f;
+    --night: #24163f;
+    --rule: #ded5eb;
+    --mono: "Cascadia Mono", Consolas, monospace;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    color: var(--ink);
+    background: #eee9f5;
+    scrollbar-color: #8e7ca7 #eee9f5;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; }
+  main { width: min(100% - 2rem, 76rem); margin: 1rem auto; }
+  .slide {
+    container-type: inline-size;
+    position: relative;
+    min-height: clamp(33rem, calc(100svh - 7rem), 44rem);
+    padding: clamp(1.4rem, 4.5vw, 4rem);
+    display: flex;
+    flex-direction: column;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 1.25rem;
+    box-shadow: 0 1.1rem 3rem #24163f13;
+    margin-block-end: 1rem;
+  }
+  .slide:focus-visible { outline-offset: 3px; }
+  .slide > header { margin-bottom: clamp(1.3rem, 3cqw, 2.4rem); }
+  .eyebrow, .ticket-label {
+    font-family: var(--mono); font-size: .83rem; font-weight: 700;
+    letter-spacing: .075em; text-transform: uppercase;
+  }
+  .eyebrow { margin: 0 0 .75rem; color: var(--violet); }
+  h1, h2, p { margin: 0; }
+  h1, h2 { letter-spacing: -.042em; line-height: 1.05; text-wrap: balance; }
+  h1 { font-size: clamp(2.9rem, 8cqw, 6rem); }
+  h2 { font-size: clamp(2rem, 5cqw, 3.7rem); }
+  .intro { margin-top: .9rem; color: var(--muted); font-size: clamp(1rem, 2.05cqw, 1.35rem); line-height: 1.45; max-width: 52rem; }
+  .cover {
+    background: var(--night); color: var(--paper); border-color: var(--night);
+    justify-content: space-between;
+  }
+  .cover .eyebrow, .cover .intro { color: var(--lavender); }
+  .cover-grid { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr); align-items: center; gap: 3rem; margin-block: 2.2rem; }
+  .ticket {
+    position: relative; background: var(--paper); color: var(--night);
+    border-radius: .6rem; transform: rotate(-4deg);
+    box-shadow: .6rem .8rem 0 #8d72c4; font-family: var(--mono);
+    padding: clamp(1rem, 3cqw, 2rem);
+  }
+  .ticket-label { color: var(--violet); }
+  .ticket strong { display: block; font-size: clamp(1.8rem, 4cqw, 3.25rem); line-height: 1.05; margin-block: .45rem 1rem; }
+  .barcode {
+    height: 2.4rem; margin-block: .9rem .5rem;
+    background: repeating-linear-gradient(90deg, var(--night) 0 2px, transparent 2px 5px, var(--night) 5px 6px, transparent 6px 9px, var(--night) 9px 13px, transparent 13px 16px, var(--night) 16px 17px, transparent 17px 20px, var(--night) 20px 23px, transparent 23px 25px);
+  }
+  .cover-foot { display: flex; justify-content: space-between; gap: 1rem; align-items: end; border-top: 1px solid #8d72c4; padding-top: 1.2rem; }
+  .cover-foot time { font-size: clamp(1.4rem, 3cqw, 2rem); font-weight: 750; }
+  .cover-foot span { color: var(--lavender); }
+  .rows { margin: 0; }
+  .rows > div { display: grid; grid-template-columns: minmax(9rem, 27%) 1fr; gap: 1.4rem; padding: clamp(.85rem, 2.1cqw, 1.5rem) 0; border-top: 1px solid var(--rule); }
+  dt { color: var(--violet); font-weight: 750; }
+  dt, dd { margin: 0; font-size: clamp(1rem, 2.3cqw, 1.55rem); line-height: 1.42; }
+  .source { margin-top: auto; padding-top: 1rem; color: var(--muted); font-size: .91rem; line-height: 1.5; }
+  .recap { padding-block: clamp(1.4rem, 3vw, 2.65rem); }
+  .recap > header { margin-bottom: 1.25rem; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: .65rem; }
+  table { border-collapse: collapse; width: 100%; min-width: 39rem; text-align: left; }
+  th, td { padding: .3rem .8rem; }
+  thead { background: var(--night); color: var(--paper); }
+  tbody th { font-weight: 650; }
+  tbody tr + tr { border-top: 1px solid var(--rule); }
+  tbody tr:nth-child(even) { background: #f1ebf9; }
+  td:last-child { color: var(--muted); }
+  input {
+    width: 100%; min-width: 7rem; max-width: 11rem; min-height: 2.75rem;
+    border: 1px solid #aa9cbb; border-radius: .4rem; background: white;
+    padding: .25rem .55rem; font: inherit; color: var(--ink);
+  }
+  input::placeholder { color: var(--muted); opacity: 1; }
+  :focus-visible { outline: 3px solid #7a4bc4; outline-offset: 3px; }
+  .controls {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    gap: .6rem 1rem; padding: .65rem 0;
+  }
+  .buttons, .utilities { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; }
+  button {
+    min-height: 2.75rem; border: 1px solid #b6a8c9; border-radius: .55rem;
+    background: var(--paper); color: var(--ink); font: inherit; font-weight: 650;
+    padding: .4rem .85rem; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--lavender); }
+  button:active:not(:disabled) { border-color: var(--violet); }
+  button:disabled { color: var(--muted); opacity: .66; cursor: default; }
+  #next { background: var(--violet); color: white; border-color: var(--violet); }
+  #next:hover:not(:disabled) { background: var(--night); }
+  #count { font: 700 .88rem var(--mono); min-width: 4.5rem; text-align: center; }
+  .key-hint { font-size: .85rem; color: var(--muted); }
+  #status { color: var(--muted); font-size: .9rem; }
+  .print-value { display: none; }
+  @media (max-width: 650px) {
+    main { width: calc(100% - 1rem); margin: .5rem auto; }
+    .slide { min-height: 0; border-radius: .8rem; }
+    .cover-grid { grid-template-columns: 1fr; gap: 1.8rem; }
+    .ticket { max-width: 15rem; margin: .3rem .4rem .7rem; }
+    .cover-foot { align-items: start; flex-direction: column; }
+    .rows > div { grid-template-columns: 1fr; gap: .3rem; }
+    .key-hint { display: none; }
+  }
+  @media (forced-colors: active) { :root { scrollbar-color: auto; } }
+  @page { size: A4 landscape; margin: 10mm; }
+  @media print {
+    :root, body { background: white; }
+    main { width: 100%; margin: 0; }
+    .slide, .slide[hidden] {
+      display: flex !important; border-radius: 0; box-shadow: none;
+      min-height: 177mm; padding: 12mm; margin: 0; break-inside: avoid;
+      print-color-adjust: exact;
+    }
+    .slide + .slide { break-before: page; }
+    .controls, #status, .screen-only, input { display: none !important; }
+    .print-value { display: inline; }
+    .table-wrap { overflow: visible; }
+    table { min-width: 0; }
+  }
+</style>
+<main id="report">
+  <section class="slide cover" id="slide-1" tabindex="-1" aria-labelledby="title-1">
+    <p class="eyebrow">PT Tirta Kumala Sari · Tim Warehouse</p>
+    <div class="cover-grid">
+      <div>
+        <h1 id="title-1">Laporan bulanan<br>retur gudang</h1>
+        <p class="intro">Pemeriksaan barang kembali, bukti unboxing, dan tindak lanjut kasus melalui onboxin.</p>
+      </div>
+      <div class="ticket" aria-hidden="true">
+        <span class="ticket-label">Laporan operasional</span>
+        <strong>RETUR<br>GUDANG</strong>
+        <div class="barcode"></div>
+        <span>ONBOXIN / 2026–10</span>
+      </div>
+    </div>
+    <div class="cover-foot"><time datetime="2026-10">Oktober 2026</time><span>Periode 1–31 Oktober</span></div>
+  </section>
+
+  <section class="slide" id="slide-2" tabindex="-1" aria-labelledby="title-2">
+    <header><p class="eyebrow">Tujuan penggunaan</p><h2 id="title-2">Untuk apa gudang memakai onboxin?</h2>
+      <p class="intro">Saat paket retur datang, gudang perlu memastikan barang apa yang kembali, berapa jumlahnya, dan bagaimana kondisinya.</p></header>
+    <dl class="rows">
+      <div><dt>Verifikasi isi paket</dt><dd>Bandingkan barang yang seharusnya kembali dengan barang yang benar-benar diterima. Catat selisih jumlah, kerusakan, atau salah barang.</dd></div>
+      <div><dt>Bukti per retur</dt><dd>Nomor resi menghubungkan daftar barang, jumlah, kondisi, dan video unboxing dalam satu catatan.</dd></div>
+      <div><dt>Serah terima kasus</dt><dd>CS memakai catatan pemeriksaan gudang untuk menindaklanjuti retur bermasalah. Jika kasus diteruskan ke RMA, bukti tetap ikut terbawa.</dd></div>
+    </dl>
+  </section>
+
+  <section class="slide" id="slide-3" tabindex="-1" aria-labelledby="title-3">
+    <header><p class="eyebrow">Pekerjaan Warehouse</p><h2 id="title-3">Pemeriksaan paket retur</h2>
+      <p class="intro">Pemeriksaan dimulai saat paket diterima dan selesai setelah hasilnya tersimpan di Laporan Global.</p></header>
+    <dl class="rows">
+      <div><dt>01 · Identifikasi paket</dt><dd>Pindai nomor resi dan rekam proses membuka paket.</dd></div>
+      <div><dt>02 · Periksa isi paket</dt><dd>Pindai SKU satu per satu, hitung unit yang diterima, dan catat kondisi setiap barang.</dd></div>
+      <div><dt>03 · Simpan hasil</dt><dd>Cocokkan hasil pemeriksaan dengan bukti video. Simpan barang baik dan barang bermasalah dalam catatan retur yang sama.</dd></div>
+    </dl>
+  </section>
+
+  <section class="slide" id="slide-4" tabindex="-1" aria-labelledby="title-4">
+    <header><p class="eyebrow">Serah terima antartim</p><h2 id="title-4">Divisi yang terhubung</h2>
+      <p class="intro">Gudang memulai pencatatan. Hasil pemeriksaan menentukan langkah berikutnya.</p></header>
+    <dl class="rows">
+      <div><dt>Gudang → Laporan Global</dt><dd>Operator memindai resi dan SKU serta mencatat kondisi dan video. Semua retur masuk laporan, termasuk barang baik.</dd></div>
+      <div><dt>Gudang → CS</dt><dd>Untuk retur bermasalah, CS memeriksa bukti dan menangani banding ke marketplace jika sesuai.</dd></div>
+      <div><dt>CS → RMA</dt><dd>Jika kasus terkait ekspedisi, CS bisa langsung menyerahkannya. RMA menerima bukti dan mengurus klaim ke ekspedisi.</dd></div>
+      <div><dt>CS atau RMA → Finance</dt><dd>Jika klaim disetujui, Finance memakai catatan keputusan untuk mencocokkan dan mencatat dana yang benar-benar masuk.</dd></div>
+    </dl>
+  </section>
+
+  <section class="slide recap" id="slide-5" tabindex="-1" aria-labelledby="title-5">
+    <header><p class="eyebrow">Periode 1–31 Oktober</p><h2 id="title-5">Rekap pemeriksaan Oktober</h2>
+      <p class="intro">Isi angka setelah tim gudang mencocokkan rekap dengan hasil pemeriksaan.</p></header>
+    <div class="table-wrap" role="region" tabindex="0" aria-label="Tabel indikator Oktober">
+      <table aria-describedby="recap-note">
+        <thead><tr><th scope="col">Indikator</th><th scope="col">Oktober 2026</th><th scope="col">Sumber dan dasar tanggal</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Order retur unik</th><td><input aria-label="Order retur unik" inputmode="numeric" placeholder="—"><span class="print-value">—</span></td><td>Laporan Global / pemeriksaan</td></tr>
+          <tr><th scope="row">Unit retur</th><td><input aria-label="Unit retur" inputmode="numeric" placeholder="—"><span class="print-value">—</span></td><td>Laporan Global / pemeriksaan</td></tr>
+          <tr><th scope="row">Unit bermasalah</th><td><input aria-label="Unit bermasalah" inputmode="numeric" placeholder="—"><span class="print-value">—</span></td><td>Laporan Global / pemeriksaan</td></tr>
+          <tr><th scope="row">Unit kondisi baik</th><td><input aria-label="Unit kondisi baik" inputmode="numeric" placeholder="—"><span class="print-value">—</span></td><td>Laporan Global / pemeriksaan</td></tr>
+          <tr><th scope="row">Order dengan bukti video</th><td><input aria-label="Order dengan bukti video" inputmode="numeric" placeholder="—"><span class="print-value">—</span></td><td>Laporan Global / resi dengan tautan video</td></tr>
+          <tr><th scope="row">Kasus yang diserahkan ke RMA</th><td><input aria-label="Kasus yang diserahkan ke RMA" inputmode="numeric" placeholder="—"><span class="print-value">—</span></td><td>Klaim RMA / tanggal serah terima dari CS</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="source" id="recap-note">Tanda — berarti angka belum tersedia. <span class="screen-only">Isian berlaku di tab ini. Gunakan Cetak / PDF untuk menyimpan salinan berisi angka.</span></p>
+  </section>
+
+  <section class="slide" id="slide-6" tabindex="-1" aria-labelledby="title-6">
+    <header><p class="eyebrow">Contoh ilustrasi</p><h2 id="title-6">Saat jumlah barang tidak sesuai</h2>
+      <p class="intro">Dalam satu retur, 10 unit seharusnya kembali, tetapi gudang hanya menerima 8 unit.</p></header>
+    <dl class="rows">
+      <div><dt>Temuan gudang</dt><dd>Catat 8 unit diterima dan 2 unit kurang. Sertakan nomor resi, SKU, dan video pembukaan paket.</dd></div>
+      <div><dt>Tindak lanjut CS</dt><dd>CS memeriksa bukti untuk menentukan apakah kasus perlu diajukan ke marketplace atau diserahkan ke RMA untuk klaim ekspedisi.</dd></div>
+      <div><dt>Hasil kasus</dt><dd>Keputusan klaim dicatat oleh tim yang menanganinya. Jika pembayaran masuk, Finance mencatat dana yang diterima.</dd></div>
+    </dl>
+  </section>
+
+  <section class="slide" id="slide-7" tabindex="-1" aria-labelledby="title-7">
+    <header><p class="eyebrow">Usulan tindak lanjut</p><h2 id="title-7">Prioritas November</h2>
+      <p class="intro">Usulan tindak lanjut Warehouse setelah penutupan laporan Oktober.</p></header>
+    <dl class="rows">
+      <div><dt>01 · Cocokkan rekap</dt><dd>Periksa jumlah order unik, unit yang diterima, dan kondisi barang pada periode Oktober.</dd></div>
+      <div><dt>02 · Lengkapi bukti</dt><dd>Periksa retur bermasalah yang masih kekurangan catatan kondisi, rincian SKU, atau tautan video.</dd></div>
+      <div><dt>03 · Tinjau kasus terbuka</dt><dd>Bahas dengan CS dan RMA kasus yang masih menunggu pemeriksaan, keputusan, atau bukti tambahan dari gudang.</dd></div>
+    </dl>
+  </section>
+
+  <nav class="controls" aria-label="Navigasi presentasi" hidden>
+    <div class="buttons">
+      <button type="button" id="prev">← Sebelumnya</button>
+      <output id="count" aria-label="Posisi slide" aria-live="polite"></output>
+      <button type="button" id="next">Berikutnya →</button>
+    </div>
+    <div class="utilities">
+      <span class="key-hint">Gunakan tombol panah ← →</span>
+      <button type="button" id="fullscreen" hidden>Layar penuh</button>
+      <button type="button" id="print">Cetak / PDF</button>
+    </div>
+  </nav>
+  <p id="status" role="status" hidden></p>
+</main>
+<script>
+  const slides = [...document.querySelectorAll(".slide")];
+  const report = document.querySelector("main");
+  const previous = document.querySelector("#prev");
+  const next = document.querySelector("#next");
+  const count = document.querySelector("#count");
+  const full = document.querySelector("#fullscreen");
+  const status = document.querySelector("#status");
+  let current = 0;
+
+  function show(index, focus = false) {
+    current = Math.min(slides.length - 1, Math.max(0, index));
+    slides.forEach((slide, position) => { slide.hidden = position !== current; });
+    previous.disabled = current === 0;
+    next.disabled = current === slides.length - 1;
+    count.textContent = (current + 1) + " / " + slides.length;
+    if (focus) {
+      slides[current].focus({ preventScroll: true });
+      window.scrollTo(0, 0);
+    }
+  }
+
+  previous.addEventListener("click", () => show(current - 1, true));
+  next.addEventListener("click", () => show(current + 1, true));
+  document.addEventListener("keydown", event => {
+    if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable], .table-wrap")) return;
+    const destination = { ArrowRight: current + 1, ArrowLeft: current - 1, Home: 0, End: slides.length - 1 }[event.key];
+    if (typeof destination !== "number") return;
+    event.preventDefault();
+    show(destination, true);
+  });
+
+  if (document.fullscreenEnabled && document.documentElement.requestFullscreen) {
+    full.hidden = false;
+    full.addEventListener("click", async () => {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await document.documentElement.requestFullscreen();
+        status.hidden = true;
+      } catch {
+        status.textContent = "Layar penuh tidak tersedia di browser ini. Anda tetap dapat berpindah slide.";
+        status.hidden = false;
+      }
+    });
+    document.addEventListener("fullscreenchange", () => {
+      full.textContent = document.fullscreenElement ? "Keluar layar penuh" : "Layar penuh";
+    });
+  }
+  document.querySelectorAll("tbody input").forEach(input => {
+    const sync = () => { input.nextElementSibling.textContent = input.value.trim() || "—"; };
+    input.addEventListener("input", sync);
+    window.addEventListener("beforeprint", sync);
+    sync();
+  });
+  document.querySelector("#print").addEventListener("click", () => window.print());
+  report.querySelector(".controls").hidden = false;
+  show(0);
+</script>
+</html>
+
